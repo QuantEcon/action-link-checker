@@ -1,0 +1,448 @@
+name: 'AI-Powered Link Checker'
+description: 'Check and validate web links in HTML files with AI-powered suggestions for improvements'
+author: 'QuantEcon'
+
+inputs:
+  html-path:
+    description: 'Path to directory containing HTML files to scan'
+    required: false
+    default: './_build/html'
+  mode:
+    description: 'Scanning mode: "full" for all files, "changed" for PR-changed files only'
+    required: false
+    default: 'full'
+  silent-codes:
+    description: 'HTTP status codes to silently report without failing (comma-separated)'
+    required: false
+    default: '403,503'
+  fail-on-broken:
+    description: 'Whether to fail the workflow if broken links are found'
+    required: false
+    default: 'true'
+  ai-suggestions:
+    description: 'Whether to enable AI-powered link improvement suggestions'
+    required: false
+    default: 'true'
+  create-issue:
+    description: 'Whether to create a GitHub issue when broken links are found'
+    required: false
+    default: 'false'
+  issue-title:
+    description: 'Title for the GitHub issue when broken links are found'
+    required: false
+    default: 'Broken Links Found in Documentation'
+  create-artifact:
+    description: 'Whether to create a workflow artifact with the link report'
+    required: false
+    default: 'false'
+  artifact-name:
+    description: 'Name for the workflow artifact containing the link report'
+    required: false
+    default: 'link-check-report'
+  notify:
+    description: 'GitHub username(s) to assign to the created issue (comma-separated for multiple users)'
+    required: false
+    default: ''
+  timeout:
+    description: 'Timeout in seconds for each link check (increased default for better robustness)'
+    required: false
+    default: '45'
+  max-redirects:
+    description: 'Maximum number of redirects to follow'
+    required: false
+    default: '5'
+
+outputs:
+  broken-links-found:
+    description: 'Whether broken links were found (true/false)'
+    value: ${{ steps.check.outputs.broken-links-found }}
+  broken-link-count:
+    description: 'Number of broken links found'
+    value: ${{ steps.check.outputs.broken-link-count }}
+  redirect-count:
+    description: 'Number of redirects found'
+    value: ${{ steps.check.outputs.redirect-count }}
+  link-details:
+    description: 'Details of broken links and suggestions'
+    value: ${{ steps.check.outputs.link-details }}
+  ai-suggestions:
+    description: 'AI-powered suggestions for link improvements'
+    value: ${{ steps.check.outputs.ai-suggestions }}
+  issue-url:
+    description: 'URL of the created GitHub issue (if create-issue is enabled)'
+    value: ${{ steps.create-issue.outputs.issue-url }}
+  artifact-path:
+    description: 'Path to the created artifact file (if create-artifact is enabled)'
+    value: ${{ steps.create-artifact.outputs.artifact-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python3 -m pip install requests beautifulsoup4 --quiet
+
+    - name: Check links and generate AI suggestions
+      id: check
+      shell: bash
+      run: |
+        # Get the action directory
+        ACTION_DIR="${{ github.action_path }}"
+        
+        # Parse inputs
+        HTML_PATH="${{ inputs.html-path }}"
+        MODE="${{ inputs.mode }}"
+        SILENT_CODES="${{ inputs.silent-codes }}"
+        FAIL_ON_BROKEN="${{ inputs.fail-on-broken }}"
+        AI_SUGGESTIONS="${{ inputs.ai-suggestions }}"
+        TIMEOUT="${{ inputs.timeout }}"
+        MAX_REDIRECTS="${{ inputs.max-redirects }}"
+        
+        echo "Scanning HTML files in: $HTML_PATH"
+        echo "Mode: $MODE"
+        echo "Silent codes: $SILENT_CODES"
+        echo "AI suggestions enabled: $AI_SUGGESTIONS"
+        
+        # Initialize counters
+        TOTAL_BROKEN=0
+        TOTAL_REDIRECTS=0
+        BROKEN_LINKS_FOUND="false"
+        LINK_DETAILS=""
+        AI_SUGGESTIONS_OUTPUT=""
+        DETAILED_REPORT=""
+        
+        # Check if HTML path exists
+        if [ ! -e "$HTML_PATH" ]; then
+          echo "Error: HTML path '$HTML_PATH' does not exist"
+          exit 1
+        fi
+        
+        # Determine files to check based on mode
+        if [ "$MODE" = "changed" ] && [ "${{ github.event_name }}" = "pull_request" ]; then
+          echo "PR mode: checking only changed files"
+          # Get changed HTML files in the target directory
+          FILES_CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E "\.html$" | grep "^$HTML_PATH/" || true)
+          if [ -z "$FILES_CHANGED" ]; then
+            echo "No HTML files changed in PR, checking all files in HTML path"
+            mapfile -d '' FILES < <(find "$HTML_PATH" -name "*.html" -type f -print0)
+          else
+            mapfile -t FILES <<< "$FILES_CHANGED"
+          fi
+        else
+          echo "Full mode: checking all HTML files"
+          mapfile -d '' FILES < <(find "$HTML_PATH" -name "*.html" -type f -print0)
+        fi
+        
+        echo "Found ${#FILES[@]} HTML files to check"
+        
+        # Process each HTML file
+        for file in "${FILES[@]}"; do
+          if [ ! -f "$file" ]; then
+            continue
+          fi
+          
+          echo "Checking links in: $file"
+          
+          # Build AI suggestions flag
+          AI_FLAG=""
+          if [ "$AI_SUGGESTIONS" = "true" ]; then
+            AI_FLAG="--ai-suggestions"
+          fi
+          
+          # Run link checker and capture JSON output
+          result_json=$(python3 "$ACTION_DIR/link_checker.py" "$file" \
+            --timeout "$TIMEOUT" \
+            --max-redirects "$MAX_REDIRECTS" \
+            --silent-codes "$SILENT_CODES" \
+            $AI_FLAG 2>/tmp/stderr.log)
+          
+          if [ $? -ne 0 ] || [ -z "$result_json" ]; then
+            echo "Warning: Failed to process $file"
+            cat /tmp/stderr.log >&2
+            continue
+          fi
+          
+          # Parse results and update counters
+          broken_count=$(echo "$result_json" | python3 -c "import json, sys; data=json.load(sys.stdin); print(len(data['broken_results']))")
+          redirect_count=$(echo "$result_json" | python3 -c "import json, sys; data=json.load(sys.stdin); print(len(data['redirect_results']))")
+          total_links=$(echo "$result_json" | python3 -c "import json, sys; data=json.load(sys.stdin); print(data['total_links'])")
+          
+          TOTAL_BROKEN=$((TOTAL_BROKEN + broken_count))
+          TOTAL_REDIRECTS=$((TOTAL_REDIRECTS + redirect_count))
+          
+          if [ "$broken_count" -gt 0 ] || [ "$redirect_count" -gt 0 ]; then
+            BROKEN_LINKS_FOUND="true"
+            
+            # Extract detailed results for reporting
+            if [ "$broken_count" -gt 0 ]; then
+              broken_details=$(echo "$result_json" | python3 "$ACTION_DIR/format_results.py" broken)
+              LINK_DETAILS="$LINK_DETAILS\n\n**$file** - $broken_count broken link(s):\n$broken_details"
+            fi
+            
+            if [ "$redirect_count" -gt 0 ]; then
+              redirect_details=$(echo "$result_json" | python3 "$ACTION_DIR/format_results.py" redirect)
+              LINK_DETAILS="$LINK_DETAILS\n\n**$file** - $redirect_count redirect(s):\n$redirect_details"
+            fi
+            
+            # Extract AI suggestions
+            if [ "$AI_SUGGESTIONS" = "true" ]; then
+              ai_details=$(echo "$result_json" | python3 "$ACTION_DIR/format_results.py" ai)
+              if [ -n "$ai_details" ]; then
+                AI_SUGGESTIONS_OUTPUT="$AI_SUGGESTIONS_OUTPUT\n\n**$file** - AI Suggestions:\n$ai_details"
+              fi
+            fi
+          fi
+          
+          echo "  Found $total_links total links, $broken_count broken, $redirect_count redirected"
+        done
+        
+        # Set outputs
+        echo "broken-links-found=$BROKEN_LINKS_FOUND" >> $GITHUB_OUTPUT
+        echo "broken-link-count=$TOTAL_BROKEN" >> $GITHUB_OUTPUT
+        echo "redirect-count=$TOTAL_REDIRECTS" >> $GITHUB_OUTPUT
+        echo "link-details<<EOF" >> $GITHUB_OUTPUT
+        echo -e "$LINK_DETAILS" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        echo "ai-suggestions<<EOF" >> $GITHUB_OUTPUT
+        echo -e "$AI_SUGGESTIONS_OUTPUT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        
+        # Create detailed report for artifacts/issues
+        DETAILED_REPORT="## Link Check Summary\n\n"
+        DETAILED_REPORT="$DETAILED_REPORT- **Total broken links**: $TOTAL_BROKEN\n"
+        DETAILED_REPORT="$DETAILED_REPORT- **Total redirects found**: $TOTAL_REDIRECTS\n\n"
+        
+        if [ "$TOTAL_BROKEN" -gt 0 ]; then
+          DETAILED_REPORT="$DETAILED_REPORT## Broken Links\n$LINK_DETAILS\n\n"
+        fi
+        
+        if [ "$AI_SUGGESTIONS" = "true" ] && [ -n "$AI_SUGGESTIONS_OUTPUT" ]; then
+          DETAILED_REPORT="$DETAILED_REPORT## AI-Powered Suggestions\n$AI_SUGGESTIONS_OUTPUT\n\n"
+        fi
+        
+        echo "detailed-report<<EOF" >> $GITHUB_OUTPUT
+        echo -e "$DETAILED_REPORT" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        
+        # Summary
+        if [ "$BROKEN_LINKS_FOUND" = "true" ]; then
+          echo "❌ Found $TOTAL_BROKEN broken link(s) and $TOTAL_REDIRECTS redirect(s)"
+          if [ "$FAIL_ON_BROKEN" = "true" ]; then
+            echo "::error::Found $TOTAL_BROKEN broken link(s) in HTML files"
+          fi
+        else
+          echo "✅ No broken links found"
+        fi
+
+    - name: Post PR comment with link report
+      if: inputs.fail-on-broken == 'true' && steps.check.outputs.broken-links-found == 'true' && github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const brokenCount = '${{ steps.check.outputs.broken-link-count }}';
+          const redirectCount = '${{ steps.check.outputs.redirect-count }}';
+          const detailedReport = ${{ toJSON(steps.check.outputs.detailed-report) }};
+          
+          const body = [
+            '## 🔗 Link Check Results',
+            '',
+            '🚨 **' + brokenCount + ' broken link(s)** and **' + redirectCount + ' redirect(s)** were found.',
+            '',
+            '**Build Details:**',
+            '- **Workflow Run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})',
+            '- **Commit:** ${{ github.sha }}',
+            '- **Date:** ' + new Date().toISOString(),
+            '',
+            '---',
+            '',
+            detailedReport,
+            '',
+            '---',
+            '',
+            '**Next Steps:**',
+            '1. Review the broken links listed above',
+            '2. Update or remove broken links',
+            '3. Consider applying AI suggestions for better alternatives',
+            '4. Push the changes to update this PR',
+            '',
+            '📝 *This comment was automatically generated by the [AI-Powered Link Checker Action](https://github.com/QuantEcon/meta/.github/actions/link-checker).*'
+          ].join('\n');
+          
+          try {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+            console.log('Posted PR comment with link check results');
+          } catch (error) {
+            console.error('Failed to create PR comment:', error);
+            core.setFailed('Failed to create PR comment: ' + error.message);
+          }
+
+    - name: Fail workflow on broken links
+      if: inputs.fail-on-broken == 'true' && steps.check.outputs.broken-links-found == 'true'
+      shell: bash
+      run: |
+        echo "Failing workflow due to broken links found"
+        exit 1
+
+    - name: Create artifact with link report
+      id: create-artifact
+      if: inputs.create-artifact == 'true' && steps.check.outputs.broken-links-found == 'true'
+      shell: bash
+      run: |
+        ARTIFACT_NAME="${{ inputs.artifact-name }}"
+        ARTIFACT_FILE="$ARTIFACT_NAME.md"
+        CURRENT_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        
+        {
+          echo "# Link Check Report"
+          echo ""
+          echo "**Date:** $CURRENT_DATE"
+          echo "**Repository:** ${{ github.repository }}"
+          echo "**Workflow:** ${{ github.workflow }}"
+          echo "**Run ID:** ${{ github.run_id }}"
+          echo "**Broken Links Found:** ${{ steps.check.outputs.broken-link-count }}"
+          echo "**Redirects Found:** ${{ steps.check.outputs.redirect-count }}"
+          echo ""
+          echo "---"
+          echo ""
+          echo "${{ steps.check.outputs.detailed-report }}"
+          echo ""
+          echo "---"
+          echo ""
+          echo "Generated by [AI-Powered Link Checker Action](https://github.com/QuantEcon/meta/.github/actions/link-checker)"
+        } > "$ARTIFACT_FILE"
+        
+        echo "artifact-path=$ARTIFACT_FILE" >> $GITHUB_OUTPUT
+        echo "Created link check report artifact: $ARTIFACT_FILE"
+
+    - name: Upload link report artifact
+      if: inputs.create-artifact == 'true' && steps.check.outputs.broken-links-found == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.create-artifact.outputs.artifact-path }}
+        retention-days: 30
+
+    - name: Create GitHub issue
+      id: create-issue
+      if: inputs.create-issue == 'true' && steps.check.outputs.broken-links-found == 'true'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const brokenCount = '${{ steps.check.outputs.broken-link-count }}';
+          const redirectCount = '${{ steps.check.outputs.redirect-count }}';
+          const detailedReport = ${{ toJSON(steps.check.outputs.detailed-report) }};
+          const title = '${{ inputs.issue-title }}';
+          const notify = '${{ inputs.notify }}';
+          
+          const body = [
+            '# Link Check Report',
+            '',
+            '🚨 **' + brokenCount + ' broken link(s)** and **' + redirectCount + ' redirect(s)** were found in the documentation.',
+            '',
+            '**Details:**',
+            '- **Repository:** ${{ github.repository }}',
+            '- **Workflow:** ${{ github.workflow }}',
+            '- **Run ID:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})',
+            '- **Commit:** ${{ github.sha }}',
+            '- **Branch:** ${{ github.ref_name }}',
+            '- **Date:** ' + new Date().toISOString(),
+            '',
+            '---',
+            '',
+            detailedReport,
+            '',
+            '---',
+            '',
+            '**Next Steps:**',
+            '1. Review the broken links listed above',
+            '2. Update or remove broken links from the source files',
+            '3. Consider applying AI suggestions for better alternatives',
+            '4. Re-run the link check to verify fixes',
+            '',
+            '**Note:** This issue was automatically created by the [AI-Powered Link Checker Action](https://github.com/QuantEcon/meta/.github/actions/link-checker).',
+            '',
+            'Please close this issue once all broken links have been addressed.'
+          ].join('\n');
+          
+          try {
+            const response = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['bug', 'documentation', 'broken-links']
+            });
+            
+            const issueUrl = response.data.html_url;
+            const issueNumber = response.data.number;
+            console.log('Created issue: ' + issueUrl);
+            core.setOutput('issue-url', issueUrl);
+            
+            // Assign users to the issue if notify parameter is provided
+            if (notify && notify.trim()) {
+              try {
+                const assignees = notify.split(',')
+                  .map(username => username.trim())
+                  .filter(username => username.length > 0);
+                
+                if (assignees.length > 0) {
+                  console.log('Assigning issue to users: ' + assignees.join(', '));
+                  
+                  await github.rest.issues.addAssignees({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issueNumber,
+                    assignees: assignees
+                  });
+                  
+                  console.log('Successfully assigned issue to: ' + assignees.join(', '));
+                }
+              } catch (assignError) {
+                console.error('Failed to assign users to issue:', assignError);
+                console.log('Issue was created successfully, but assignment failed.');
+              }
+            }
+            
+            return issueUrl;
+          } catch (error) {
+            console.error('Failed to create issue:', error);
+            core.setFailed('Failed to create issue: ' + error.message);
+          }
+
+    - name: Post simple PR comment linking to issue
+      if: inputs.create-issue == 'true' && steps.check.outputs.broken-links-found == 'true' && github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const issueUrl = '${{ steps.create-issue.outputs.issue-url }}';
+          
+          const body = [
+            '🔗 Link check found broken links in this PR.',
+            '',
+            `For detailed analysis and AI-powered suggestions, please check ${issueUrl}`,
+            '',
+            'Note: This issue was automatically created by the [AI-Powered Link Checker Action](https://github.com/QuantEcon/meta/.github/actions/link-checker).'
+          ].join('\n');
+          
+          try {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+            console.log('Posted simple PR comment linking to issue');
+          } catch (error) {
+            console.error('Failed to create PR comment:', error);
+            core.setFailed('Failed to create PR comment: ' + error.message);
+          }
+
+branding:
+  icon: 'link'
+  color: 'blue'
