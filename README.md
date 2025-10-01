@@ -33,7 +33,7 @@ A sophisticated GitHub Action that validates web links in HTML files with AI-pow
 
 ```yaml
 - name: Check links in documentation
-  uses: QuantEcon/meta/.github/actions/link-checker@main
+  uses: QuantEcon/action-link-checker@v1
 ```
 
 ### Weekly Full Project Scan
@@ -57,7 +57,7 @@ jobs:
           ref: gh-pages  # Check the published site
       
       - name: AI-powered link check
-        uses: QuantEcon/meta/.github/actions/link-checker@main
+        uses: QuantEcon/action-link-checker@v1
         with:
           html-path: '.'
           mode: 'full'
@@ -90,7 +90,7 @@ jobs:
         run: jupyter-book build .
       
       - name: Check links in changed files
-        uses: QuantEcon/meta/.github/actions/link-checker@main
+        uses: QuantEcon/action-link-checker@v1
         with:
           html-path: './_build/html'
           mode: 'changed'
@@ -103,7 +103,7 @@ jobs:
 
 ```yaml
 - name: Comprehensive link checking
-  uses: QuantEcon/meta/.github/actions/link-checker@main
+  uses: QuantEcon/action-link-checker@v1
   with:
     html-path: './_build/html'
     mode: 'full'
@@ -226,7 +226,7 @@ max-redirects: '5'   # Maximum redirects to follow
 **After (using AI-powered link checker):**
 ```yaml
 - name: AI-Powered Link Checker
-  uses: QuantEcon/meta/.github/actions/link-checker@main
+  uses: QuantEcon/action-link-checker@v1
   with:
     html-path: '.'
     fail-on-broken: 'false'
@@ -244,7 +244,7 @@ For Jupyter Book projects:
   run: jupyter-book build lectures/
 
 - name: Check links in built documentation
-  uses: QuantEcon/meta/.github/actions/link-checker@main
+  uses: QuantEcon/action-link-checker@v1
   with:
     html-path: './lectures/_build/html'
     mode: 'full'
@@ -258,7 +258,7 @@ Use action outputs in subsequent workflow steps:
 ```yaml
 - name: Check links
   id: link-check
-  uses: QuantEcon/meta/.github/actions/link-checker@main
+  uses: QuantEcon/action-link-checker@v1
   with:
     fail-on-broken: 'false'
 
