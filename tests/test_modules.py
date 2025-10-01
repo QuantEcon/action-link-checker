@@ -37,8 +37,9 @@ class TestLinkChecker(unittest.TestCase):
             # Basic test - just ensure the function doesn't crash
             try:
                 # This would normally require network access, so we'll just test structure
-                result = link_checker.parse_html_file(str(good_links_file))
-                print(f"✅ Successfully parsed HTML file")
+                result = link_checker.extract_links_from_html(str(good_links_file))
+                print(f"✅ Successfully extracted links from HTML file")
+                self.assertIsInstance(result, list)
             except Exception as e:
                 print(f"ℹ️  Expected network-related error: {e}")
         else:
