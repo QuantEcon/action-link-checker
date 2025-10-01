@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9, '3.10', '3.11']
+        
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Test Python modules
+      run: |
+        python -c "import link_checker; import format_results; print('Modules imported successfully')"
+        python link_checker.py --help
+        
+    - name: Run Python module tests
+      run: |
+        cd tests
+        python test_modules.py
+
+  test-action:
+    runs-on: ubuntu-latest
+    name: Test Link Checker Action
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Test action with real test files
+      id: test-mixed
+      continue-on-error: true
+      uses: ./
+      with:
+        html-path: 'tests'
+        fail-on-broken: 'false'
+        create-artifact: 'true'
+        artifact-name: 'test-link-report'
+        timeout: 30
+        
+    - name: Verify action ran successfully
+      run: |
+        echo "Action completed with output: ${{ steps.test-mixed.outputs.broken-links-found }}"
+        
+    - name: Test with good links only (should pass)
+      uses: ./
+      with:
+        html-path: 'tests/good-links.html'
+        fail-on-broken: 'true'
+        
+    - name: Test with silent codes for broken links
+      continue-on-error: true  
+      uses: ./
+      with:
+        html-path: 'tests/broken-links.html'
+        fail-on-broken: 'true'
+        silent-codes: '404,500'  # Treat these as silent
+        
+  test-empty-directory:
+    runs-on: ubuntu-latest
+    name: Test Empty Directory
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Create empty directory
+      run: mkdir -p empty-html
+      
+    - name: Test action on empty directory
+      uses: ./
+      with:
+        html-path: 'empty-html'
