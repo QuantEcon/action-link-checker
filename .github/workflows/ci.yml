@@ -64,12 +64,16 @@ jobs:
       run: |
         echo "Action completed with output: ${{ steps.test-mixed.outputs.broken-links-found }}"
         
-    - name: Test with good links only (should pass)
+    # Informational, like the scan below it. A clean page is asserted against
+    # the local server instead, so this no longer has to gate on github.com,
+    # python.org, jupyter.org and docs.python.org all staying redirect-free.
+    - name: Live scan of known-good links (informational, does not gate)
+      continue-on-error: true
       uses: ./
       with:
         html-path: 'tests/good-links.html'
         fail-on-broken: 'true'
-        
+
     # Informational only, and expected to report findings: the fixture holds
     # a deliberately unreachable host and three deliberate redirects. It runs
     # with fail-on-broken so that the PR-comment path is exercised, and with
@@ -83,6 +87,112 @@ jobs:
         html-path: 'tests/broken-links.html'
         fail-on-broken: 'true'
         timeout: 30
+
+    # A real 200 over real HTTP was the one thing only a public site could
+    # give us: every other deterministic fixture either skips the request
+    # (ignore-patterns) or fails transport (.invalid). Serving it from
+    # localhost keeps that coverage and removes the dependency, which is what
+    # lets every gating step in this job be offline.
+    #
+    # The routes also make the status-code paths assertable end to end for the
+    # first time. That is what the httpstat.us fixture was for, before the
+    # service stopped answering and took the coverage with it.
+    - name: Serve fixtures from localhost
+      run: |
+        mkdir -p ci-server ci-fixtures-clean ci-fixtures-redirect ci-fixtures-missing
+
+        cat > ci-server/serve.py <<'PY'
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                path = self.path.split('?')[0]
+                if path == '/moved':
+                    self.send_response(301)
+                    self.send_header('Location', '/ok')
+                    self.end_headers()
+                    return
+                body = b'<html><body>ok</body></html>'
+                self.send_response(404 if path == '/missing' else 200)
+                self.send_header('Content-Type', 'text/html')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        HTTPServer(('127.0.0.1', 8123), Handler).serve_forever()
+        PY
+
+        nohup python3 ci-server/serve.py >/dev/null 2>&1 &
+        for i in $(seq 1 40); do
+          curl -sf http://127.0.0.1:8123/ok >/dev/null && break
+          sleep 0.25
+        done
+        if ! curl -sf http://127.0.0.1:8123/ok >/dev/null; then
+          echo "::error::local fixture server did not come up on 127.0.0.1:8123"
+          exit 1
+        fi
+        echo "local fixture server ready"
+
+        cat > ci-fixtures-clean/clean.html <<'HTML'
+        <html><body>
+        <a href="http://127.0.0.1:8123/ok">Fine</a>
+        <a href="http://127.0.0.1:8123/ok/two">Also fine</a>
+        </body></html>
+        HTML
+
+        cat > ci-fixtures-redirect/moved.html <<'HTML'
+        <html><body>
+        <a href="http://127.0.0.1:8123/moved">Moved</a>
+        </body></html>
+        HTML
+
+        cat > ci-fixtures-missing/missing.html <<'HTML'
+        <html><body>
+        <a href="http://127.0.0.1:8123/missing">Gone</a>
+        </body></html>
+        HTML
+
+    # fail-on-broken is deliberately true: a clean page must exit 0 on its own,
+    # without waiting for the assertions at the end of the job.
+    - name: A clean page passes end to end
+      id: local-clean
+      uses: ./
+      with:
+        html-path: 'ci-fixtures-clean'
+        fail-on-broken: 'true'
+        ai-suggestions: 'false'
+        timeout: 10
+
+    - name: A redirect is followed and counted
+      id: local-redirect
+      uses: ./
+      with:
+        html-path: 'ci-fixtures-redirect'
+        fail-on-broken: 'false'
+        ai-suggestions: 'false'
+        timeout: 10
+
+    - name: An error status is reported
+      id: local-missing
+      uses: ./
+      with:
+        html-path: 'ci-fixtures-missing'
+        fail-on-broken: 'false'
+        ai-suggestions: 'false'
+        timeout: 10
+
+    - name: silent-codes suppresses that error status
+      id: local-silenced
+      uses: ./
+      with:
+        html-path: 'ci-fixtures-missing'
+        fail-on-broken: 'true'
+        ai-suggestions: 'false'
+        timeout: 10
+        silent-codes: '404'
 
     # Status 0 is what the checker reports when a request never reaches the
     # server. .invalid is reserved by RFC 2606 and can never resolve, so these
@@ -178,6 +288,17 @@ jobs:
         assert "unreachable found by default"       "${{ steps.unreachable-loud.outputs.broken-links-found }}" "true"
         assert "unreachable silenced by code 0"     "${{ steps.unreachable-quiet.outputs.broken-link-count }}" "0"
         assert "no findings once silenced"          "${{ steps.unreachable-quiet.outputs.broken-links-found }}" "false"
+        assert "clean page has no broken links"     "${{ steps.local-clean.outputs.broken-link-count }}"       "0"
+        assert "clean page reports nothing"         "${{ steps.local-clean.outputs.broken-links-found }}"      "false"
+        assert "redirect counted"                   "${{ steps.local-redirect.outputs.redirect-count }}"       "1"
+        assert "redirect is not broken"             "${{ steps.local-redirect.outputs.broken-link-count }}"    "0"
+        assert "error status reported"              "${{ steps.local-missing.outputs.broken-link-count }}"     "1"
+        assert "error status silenced by 404"       "${{ steps.local-silenced.outputs.broken-link-count }}"    "0"
+        assert "nothing found once 404 silenced"    "${{ steps.local-silenced.outputs.broken-links-found }}"   "false"
+
+    - name: Stop the local fixture server
+      if: always()
+      run: pkill -f ci-server/serve.py || true
 
   test-empty-directory:
     runs-on: ubuntu-latest
