@@ -4,7 +4,7 @@ Test script to simulate bot blocking scenarios
 """
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../.github/actions/link-checker'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from link_checker import is_likely_bot_blocked
 

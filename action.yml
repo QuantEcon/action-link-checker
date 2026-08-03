@@ -12,9 +12,13 @@ inputs:
     required: false
     default: 'full'
   silent-codes:
-    description: 'HTTP status codes to silently report without failing (comma-separated)'
+    description: 'HTTP status codes to silently report without failing (comma-separated). Status 0 covers requests that failed before the server answered (timeouts, connection errors)'
     required: false
     default: '403,503'
+  ignore-patterns:
+    description: 'Regex patterns for URLs to skip entirely, one per line. Matched against the full URL, so a bare domain works as a substring. Ignored URLs are never requested and cannot be reported as broken or redirected'
+    required: false
+    default: ''
   fail-on-broken:
     description: 'Whether to fail the workflow if broken links are found'
     required: false
@@ -31,6 +35,10 @@ inputs:
     description: 'Title for the GitHub issue when broken links are found'
     required: false
     default: 'Broken Links Found in Documentation'
+  update-existing-issue:
+    description: 'Reuse the newest open issue with the same title instead of opening a duplicate. Set to false to restore the previous behaviour of opening a new issue on every run'
+    required: false
+    default: 'true'
   create-artifact:
     description: 'Whether to create a workflow artifact with the link report'
     required: false
@@ -62,6 +70,9 @@ outputs:
   redirect-count:
     description: 'Number of redirects found'
     value: ${{ steps.check.outputs.redirect-count }}
+  ignored-count:
+    description: 'Number of links skipped because they matched ignore-patterns'
+    value: ${{ steps.check.outputs.ignored-count }}
   link-details:
     description: 'Details of broken links and suggestions'
     value: ${{ steps.check.outputs.link-details }}
@@ -69,8 +80,11 @@ outputs:
     description: 'AI-powered suggestions for link improvements'
     value: ${{ steps.check.outputs.ai-suggestions }}
   issue-url:
-    description: 'URL of the created GitHub issue (if create-issue is enabled)'
+    description: 'URL of the created or updated GitHub issue (if create-issue is enabled)'
     value: ${{ steps.create-issue.outputs.issue-url }}
+  issue-updated:
+    description: 'Whether an existing issue was reused rather than a new one opened (true/false)'
+    value: ${{ steps.create-issue.outputs.issue-updated }}
   artifact-path:
     description: 'Path to the created artifact file (if create-artifact is enabled)'
     value: ${{ steps.create-artifact.outputs.artifact-path }}
@@ -86,10 +100,14 @@ runs:
     - name: Check links and generate AI suggestions
       id: check
       shell: bash
+      env:
+        # Passed through the environment rather than interpolated into the
+        # script: the value is multi-line and contains regex metacharacters.
+        IGNORE_PATTERNS: ${{ inputs.ignore-patterns }}
       run: |
         # Get the action directory
         ACTION_DIR="${{ github.action_path }}"
-        
+
         # Parse inputs
         HTML_PATH="${{ inputs.html-path }}"
         MODE="${{ inputs.mode }}"
@@ -98,15 +116,25 @@ runs:
         AI_SUGGESTIONS="${{ inputs.ai-suggestions }}"
         TIMEOUT="${{ inputs.timeout }}"
         MAX_REDIRECTS="${{ inputs.max-redirects }}"
-        
+
         echo "Scanning HTML files in: $HTML_PATH"
         echo "Mode: $MODE"
         echo "Silent codes: $SILENT_CODES"
         echo "AI suggestions enabled: $AI_SUGGESTIONS"
-        
+
+        # Write ignore patterns to a file so the checker never has to parse
+        # them out of an argument list
+        IGNORE_FILE="$(mktemp)"
+        printf '%s\n' "$IGNORE_PATTERNS" > "$IGNORE_FILE"
+        IGNORE_COUNT=$(grep -cve '^[[:space:]]*$' -e '^[[:space:]]*#' "$IGNORE_FILE" || true)
+        if [ "$IGNORE_COUNT" -gt 0 ]; then
+          echo "Ignore patterns in effect: $IGNORE_COUNT"
+        fi
+
         # Initialize counters
         TOTAL_BROKEN=0
         TOTAL_REDIRECTS=0
+        TOTAL_IGNORED=0
         BROKEN_LINKS_FOUND="false"
         LINK_DETAILS=""
         AI_SUGGESTIONS_OUTPUT=""
@@ -155,6 +183,7 @@ runs:
             --timeout "$TIMEOUT" \
             --max-redirects "$MAX_REDIRECTS" \
             --silent-codes "$SILENT_CODES" \
+            --ignore-patterns-file "$IGNORE_FILE" \
             $AI_FLAG 2>/tmp/stderr.log)
           
           if [ $? -ne 0 ] || [ -z "$result_json" ]; then
@@ -166,11 +195,13 @@ runs:
           # Parse results and update counters
           broken_count=$(echo "$result_json" | python3 -c "import json, sys; data=json.load(sys.stdin); print(len(data['broken_results']))")
           redirect_count=$(echo "$result_json" | python3 -c "import json, sys; data=json.load(sys.stdin); print(len(data['redirect_results']))")
+          ignored_count=$(echo "$result_json" | python3 -c "import json, sys; data=json.load(sys.stdin); print(len(data.get('ignored_results', [])))")
           total_links=$(echo "$result_json" | python3 -c "import json, sys; data=json.load(sys.stdin); print(data['total_links'])")
-          
+
           TOTAL_BROKEN=$((TOTAL_BROKEN + broken_count))
           TOTAL_REDIRECTS=$((TOTAL_REDIRECTS + redirect_count))
-          
+          TOTAL_IGNORED=$((TOTAL_IGNORED + ignored_count))
+
           if [ "$broken_count" -gt 0 ] || [ "$redirect_count" -gt 0 ]; then
             BROKEN_LINKS_FOUND="true"
             
@@ -194,13 +225,16 @@ runs:
             fi
           fi
           
-          echo "  Found $total_links total links, $broken_count broken, $redirect_count redirected"
+          echo "  Found $total_links total links, $broken_count broken, $redirect_count redirected, $ignored_count ignored"
         done
-        
+
+        rm -f "$IGNORE_FILE"
+
         # Set outputs
         echo "broken-links-found=$BROKEN_LINKS_FOUND" >> $GITHUB_OUTPUT
         echo "broken-link-count=$TOTAL_BROKEN" >> $GITHUB_OUTPUT
         echo "redirect-count=$TOTAL_REDIRECTS" >> $GITHUB_OUTPUT
+        echo "ignored-count=$TOTAL_IGNORED" >> $GITHUB_OUTPUT
         echo "link-details<<EOF" >> $GITHUB_OUTPUT
         echo -e "$LINK_DETAILS" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
@@ -211,7 +245,11 @@ runs:
         # Create detailed report for artifacts/issues
         DETAILED_REPORT="## Link Check Summary\n\n"
         DETAILED_REPORT="$DETAILED_REPORT- **Total broken links**: $TOTAL_BROKEN\n"
-        DETAILED_REPORT="$DETAILED_REPORT- **Total redirects found**: $TOTAL_REDIRECTS\n\n"
+        DETAILED_REPORT="$DETAILED_REPORT- **Total redirects found**: $TOTAL_REDIRECTS\n"
+        if [ "$TOTAL_IGNORED" -gt 0 ]; then
+          DETAILED_REPORT="$DETAILED_REPORT- **Links skipped by ignore-patterns**: $TOTAL_IGNORED\n"
+        fi
+        DETAILED_REPORT="$DETAILED_REPORT\n"
         
         if [ "$TOTAL_BROKEN" -gt 0 ]; then
           DETAILED_REPORT="$DETAILED_REPORT## Broken Links\n$LINK_DETAILS\n\n"
@@ -266,7 +304,7 @@ runs:
             '3. Consider applying AI suggestions for better alternatives',
             '4. Push the changes to update this PR',
             '',
-            '📝 *This comment was automatically generated by the [AI-Powered Link Checker Action](https://github.com/QuantEcon/meta/.github/actions/link-checker).*'
+            '📝 *This comment was automatically generated by the [AI-Powered Link Checker Action](https://github.com/QuantEcon/action-link-checker).*'
           ].join('\n');
           
           try {
@@ -314,7 +352,7 @@ runs:
           echo ""
           echo "---"
           echo ""
-          echo "Generated by [AI-Powered Link Checker Action](https://github.com/QuantEcon/meta/.github/actions/link-checker)"
+          echo "Generated by [AI-Powered Link Checker Action](https://github.com/QuantEcon/action-link-checker)"
         } > "$ARTIFACT_FILE"
         
         echo "artifact-path=$ARTIFACT_FILE" >> $GITHUB_OUTPUT
@@ -339,7 +377,8 @@ runs:
           const detailedReport = ${{ toJSON(steps.check.outputs.detailed-report) }};
           const title = '${{ inputs.issue-title }}';
           const notify = '${{ inputs.notify }}';
-          
+          const updateExisting = '${{ inputs.update-existing-issue }}' === 'true';
+
           const body = [
             '# Link Check Report',
             '',
@@ -365,25 +404,58 @@ runs:
             '3. Consider applying AI suggestions for better alternatives',
             '4. Re-run the link check to verify fixes',
             '',
-            '**Note:** This issue was automatically created by the [AI-Powered Link Checker Action](https://github.com/QuantEcon/meta/.github/actions/link-checker).',
+            '**Note:** This issue was automatically created by the [AI-Powered Link Checker Action](https://github.com/QuantEcon/action-link-checker). While it stays open, later runs refresh this body in place rather than opening a new issue, so the report above always reflects the most recent run.',
             '',
             'Please close this issue once all broken links have been addressed.'
           ].join('\n');
           
           try {
-            const response = await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: title,
-              body: body,
-              labels: ['bug', 'documentation', 'broken-links']
-            });
-            
+            // Reuse the newest open issue with this exact title rather than
+            // opening a duplicate. A weekly cron on a recurring finding would
+            // otherwise accumulate one issue per run, which buries the real
+            // findings among the repeats.
+            let existing = null;
+            if (updateExisting) {
+              const open = await github.paginate(github.rest.issues.listForRepo, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                labels: 'broken-links',
+                per_page: 100
+              });
+              existing = open
+                .filter(issue => !issue.pull_request && issue.title === title)
+                .sort((a, b) => b.number - a.number)[0] || null;
+            }
+
+            let response;
+            if (existing) {
+              response = await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: body
+              });
+              console.log('Updated existing issue #' + existing.number +
+                          ' instead of opening a duplicate');
+            } else {
+              response = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['bug', 'documentation', 'broken-links']
+              });
+            }
+
             const issueUrl = response.data.html_url;
             const issueNumber = response.data.number;
-            console.log('Created issue: ' + issueUrl);
+            if (!existing) {
+              console.log('Created issue: ' + issueUrl);
+            }
             core.setOutput('issue-url', issueUrl);
-            
+            core.setOutput('issue-updated', existing ? 'true' : 'false');
+
             // Assign users to the issue if notify parameter is provided
             if (notify && notify.trim()) {
               try {
@@ -427,7 +499,7 @@ runs:
             '',
             `For detailed analysis and AI-powered suggestions, please check ${issueUrl}`,
             '',
-            'Note: This issue was automatically created by the [AI-Powered Link Checker Action](https://github.com/QuantEcon/meta/.github/actions/link-checker).'
+            'Note: This issue was automatically created by the [AI-Powered Link Checker Action](https://github.com/QuantEcon/action-link-checker).'
           ].join('\n');
           
           try {
