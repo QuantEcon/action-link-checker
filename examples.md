@@ -30,7 +30,7 @@ jobs:
           ref: gh-pages
       
       - name: AI-Powered Link Check
-        uses: QuantEcon/meta/.github/actions/link-checker@main
+        uses: QuantEcon/action-link-checker@v1
         with:
           html-path: '.'
           mode: 'full'
@@ -83,7 +83,7 @@ jobs:
           jupyter-book build lectures/
       
       - name: Check links in changed files
-        uses: QuantEcon/meta/.github/actions/link-checker@main
+        uses: QuantEcon/action-link-checker@v1
         with:
           html-path: './lectures/_build/html'
           mode: 'changed'  # Only check files changed in this PR
@@ -132,7 +132,7 @@ jobs:
           jupyter-book build .
       
       - name: AI-Powered Link Check
-        uses: QuantEcon/meta/.github/actions/link-checker@main
+        uses: QuantEcon/action-link-checker@v1
         with:
           html-path: './_build/html'
           mode: ${{ github.event_name == 'pull_request' && 'changed' || 'full' }}
@@ -174,7 +174,7 @@ jobs:
           ref: ${{ matrix.project.ref }}
       
       - name: Link Check - ${{ matrix.project.name }}
-        uses: QuantEcon/meta/.github/actions/link-checker@main
+        uses: QuantEcon/action-link-checker@v1
         with:
           html-path: '.'
           fail-on-broken: 'false'
@@ -190,7 +190,7 @@ For projects with many external links or slow-responding sites:
 
 ```yaml
 - name: Patient Link Checker
-  uses: QuantEcon/meta/.github/actions/link-checker@main
+  uses: QuantEcon/action-link-checker@v1
   with:
     html-path: './_build/html'
     timeout: '60'           # 60 seconds per link
@@ -208,7 +208,7 @@ For debugging and development of documentation:
 
 ```yaml
 - name: Development Link Check
-  uses: QuantEcon/meta/.github/actions/link-checker@main
+  uses: QuantEcon/action-link-checker@v1
   with:
     html-path: './_build/html'
     fail-on-broken: 'false'  # Don't fail during development
@@ -248,7 +248,7 @@ jobs:
           fail-on-warning: 'true'
       
       - name: Check for broken links
-        uses: QuantEcon/meta/.github/actions/link-checker@main
+        uses: QuantEcon/action-link-checker@v1
         with:
           html-path: './_build/html'
           mode: 'changed'
@@ -276,7 +276,7 @@ jobs:
           ref: gh-pages
       
       - name: Silent Link Check
-        uses: QuantEcon/meta/.github/actions/link-checker@main
+        uses: QuantEcon/action-link-checker@v1
         with:
           html-path: '.'
           fail-on-broken: 'false'  # Never fail
@@ -309,7 +309,7 @@ jobs:
 ### After (using AI-powered link checker):
 ```yaml
 - name: AI-Powered Link Checker
-  uses: QuantEcon/meta/.github/actions/link-checker@main
+  uses: QuantEcon/action-link-checker@v1
   with:
     html-path: '.'
     fail-on-broken: 'false'

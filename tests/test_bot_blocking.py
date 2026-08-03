@@ -1,75 +1,79 @@
 #!/usr/bin/env python3
 """
-Test script to simulate bot blocking scenarios
+Tests for the bot-blocking detection logic in link_checker.py
 """
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../.github/actions/link-checker'))
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from link_checker import is_likely_bot_blocked
 
-def test_bot_blocking_detection():
-    """Test the bot blocking detection logic"""
-    
-    # Test major site domains that commonly block bots
-    test_cases = [
-        ("https://www.netflix.com/", True, "Netflix should be detected as likely bot-blocked"),
-        ("https://code.tutsplus.com/tutorial/something", False, "Tutsplus should not be automatically flagged"),
-        ("https://www.amazon.com/", True, "Amazon should be detected as likely bot-blocked"),
-        ("https://example.com/", False, "Example.com should not be flagged"),
-        ("https://github.com/user/repo", False, "GitHub should not be flagged as bot-blocked"),
-        ("https://www.wikipedia.org/wiki/Test", True, "Wikipedia should be detected as likely bot-blocked"),
-    ]
-    
-    print("Testing bot blocking detection logic:")
-    print("-" * 50)
-    
-    for url, expected, description in test_cases:
-        result = is_likely_bot_blocked(url)
-        status = "✅ PASS" if result == expected else "❌ FAIL"
-        print(f"{status}: {description}")
-        print(f"   URL: {url}")
-        print(f"   Expected: {expected}, Got: {result}")
-        print()
-    
-    # Test encoding error detection
-    print("Testing encoding error detection:")
-    print("-" * 50)
-    
-    encoding_cases = [
-        ("https://www.netflix.com/", None, None, "encoding issue", True, "Encoding error should be detected"),
-        ("https://example.com/", None, None, "timeout", False, "Regular timeout should not be flagged"),
-        ("https://example.com/", None, 429, None, True, "Rate limiting should be detected"),
-        ("https://example.com/", None, 503, None, True, "Service unavailable should be detected"),
-    ]
-    
-    for url, content, status_code, error, expected, description in encoding_cases:
-        result = is_likely_bot_blocked(url, content, status_code, error)
-        status = "✅ PASS" if result == expected else "❌ FAIL"
-        print(f"{status}: {description}")
-        print(f"   URL: {url}, Status: {status_code}, Error: {error}")
-        print(f"   Expected: {expected}, Got: {result}")
-        print()
 
-    # Test legitimate domains with connection errors (simulating network restrictions)
-    print("Testing legitimate domain protection:")
-    print("-" * 50)
-    
-    legitimate_cases = [
-        ("https://www.python.org/", None, None, "Connection Error", True, "Python.org with connection error should be protected"),
-        ("https://jupyter.org/", None, None, "Connection Error", True, "Jupyter.org with connection error should be protected"),
-        ("https://docs.python.org/3/", None, None, "Connection Error", True, "Python docs with connection error should be protected"),
-        ("https://github.com/user/repo", None, None, "Connection Error", True, "GitHub with connection error should be protected"),
-        ("https://unknown-domain.com/", None, None, "Connection Error", False, "Unknown domain with connection error should not be protected"),
-    ]
-    
-    for url, content, status_code, error, expected, description in legitimate_cases:
-        result = is_likely_bot_blocked(url, content, status_code, error)
-        status = "✅ PASS" if result == expected else "❌ FAIL"
-        print(f"{status}: {description}")
-        print(f"   URL: {url}, Error: {error}")
-        print(f"   Expected: {expected}, Got: {result}")
-        print()
+class TestBotBlockingDetection(unittest.TestCase):
+
+    def test_major_sites_that_block_bots(self):
+        """Sites known to block automated requests are never reported broken"""
+        cases = [
+            ("https://www.netflix.com/", True),
+            ("https://www.amazon.com/", True),
+            ("https://www.wikipedia.org/wiki/Test", True),
+            ("https://code.tutsplus.com/tutorial/something", False),
+            ("https://example.com/", False),
+            ("https://github.com/user/repo", False),
+        ]
+        for url, expected in cases:
+            with self.subTest(url=url):
+                self.assertEqual(is_likely_bot_blocked(url), expected)
+
+    def test_error_and_status_code_signals(self):
+        """Encoding errors and rate-limit style status codes are absorbed"""
+        cases = [
+            ("https://www.netflix.com/", None, "encoding issue", True),
+            ("https://example.com/", None, "timeout", False),
+            ("https://example.com/", 429, None, True),
+            ("https://example.com/", 503, None, True),
+        ]
+        for url, status_code, error, expected in cases:
+            with self.subTest(url=url, status_code=status_code, error=error):
+                self.assertEqual(
+                    is_likely_bot_blocked(url, None, status_code, error), expected)
+
+    def test_legitimate_domains_on_transport_failure(self):
+        """A listed domain is protected when the request never reached the server
+
+        Both a timeout and a connection error are symptoms of a host that will
+        not answer a datacenter IP, so both are treated alike. An unlisted
+        domain stays reported.
+        """
+        cases = [
+            ("https://www.python.org/", True),
+            ("https://jupyter.org/", True),
+            ("https://docs.python.org/3/", True),
+            ("https://github.com/user/repo", True),
+            ("https://unknown-domain.com/", False),
+        ]
+        for error in ("Connection Error", "Timeout"):
+            for url, expected in cases:
+                with self.subTest(url=url, error=error):
+                    self.assertEqual(
+                        is_likely_bot_blocked(url, None, None, error,
+                                              network_failure=True),
+                        expected)
+
+    def test_legitimate_domains_not_protected_without_transport_failure(self):
+        """The allowance is keyed on the handler, not on the error text
+
+        Any exception reaching the catch-all handler can carry the word
+        'timeout' in its message without the request having failed in transit.
+        """
+        for url in ("https://www.python.org/", "https://github.com/user/repo"):
+            with self.subTest(url=url):
+                self.assertFalse(
+                    is_likely_bot_blocked(url, None, None,
+                                          "ValueError: connect timeout to 0"))
+
 
 if __name__ == "__main__":
-    test_bot_blocking_detection()
+    unittest.main(verbosity=2)

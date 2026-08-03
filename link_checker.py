@@ -17,8 +17,16 @@ def is_external_link(url):
     """Check if URL is external (starts with http/https)"""
     return url.startswith(('http://', 'https://'))
 
-def is_likely_bot_blocked(url, response_content=None, status_code=None, error=None):
-    """Detect if a site is likely blocking automated requests rather than being truly broken"""
+def is_likely_bot_blocked(url, response_content=None, status_code=None, error=None,
+                          network_failure=False):
+    """Detect if a site is likely blocking automated requests rather than being truly broken
+
+    ``network_failure`` says the request never reached the server -- a
+    timeout or a connection error. Only the caller knows that, so it is
+    passed in rather than sniffed out of the error string: an arbitrary
+    exception message can contain the word 'timeout' without the request
+    having failed in transit.
+    """
     domain_indicators = [
         'netflix.com', 'amazon.com', 'facebook.com', 'twitter.com', 'instagram.com',
         'youtube.com', 'linkedin.com', 'pinterest.com', 'reddit.com', 'wikipedia.org'
@@ -36,10 +44,17 @@ def is_likely_bot_blocked(url, response_content=None, status_code=None, error=No
         if indicator in url.lower():
             return True
     
-    # Check if it's a legitimate domain that might be blocked by network restrictions
-    for domain in legitimate_domains:
-        if domain in url.lower() and error and 'Connection Error' in str(error):
-            return True
+    # Check if it's a legitimate domain that might be blocked by network
+    # restrictions. A timeout and a connection error are two symptoms of the
+    # same cause -- a host that will not answer a datacenter IP -- so both are
+    # treated alike here. Keying this on the error string meant a listed
+    # domain was protected against 'Connection Error' and reported broken on
+    # a timeout; keying it on which handler caught the exception protects
+    # both without also matching an unrelated message that says 'timeout'.
+    if network_failure:
+        for domain in legitimate_domains:
+            if domain in url.lower():
+                return True
     
     # Check for encoding issues which often indicate bot blocking
     if error and 'encoding' in str(error).lower():
@@ -51,6 +66,49 @@ def is_likely_bot_blocked(url, response_content=None, status_code=None, error=No
         return True
     
     return False
+
+def compile_ignore_patterns(raw_patterns):
+    """Compile ignore patterns, skipping blanks, comments and invalid regexes"""
+    compiled = []
+    for pattern in raw_patterns:
+        pattern = pattern.strip()
+        if not pattern or pattern.startswith('#'):
+            continue
+        try:
+            compiled.append(re.compile(pattern))
+        except Exception as e:
+            # Deliberately broader than re.error: re.compile also raises
+            # OverflowError on an oversized repetition count and
+            # RecursionError on deep nesting, and a pattern the user typed
+            # must never be able to abort the run.
+            print(f"Warning: skipping invalid ignore pattern {pattern!r}: "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
+    return compiled
+
+def is_ignored(url, ignore_patterns):
+    """Check whether a URL matches any ignore pattern"""
+    return any(pattern.search(url) for pattern in ignore_patterns)
+
+def network_failure_result(url, error, silent_codes, network_failure=False):
+    """Build a result for a request that never returned a status code.
+
+    Status 0 is what this checker reports when a request fails before the
+    server answers. Honouring 0 in silent-codes lets a project silence
+    unreachable hosts without also silencing genuine 404s.
+
+    ``network_failure`` is set only by the timeout and connection-error
+    handlers. A malformed href, a redirect loop and a bug in this script all
+    surface as status 0 too, and silencing an unreachable host must not
+    silence those as well -- they are the project's own mistakes to fix.
+    """
+    likely_blocked = is_likely_bot_blocked(url, error=error,
+                                           network_failure=network_failure)
+    silent = likely_blocked or (network_failure and 0 in silent_codes)
+    return {
+        'url': url, 'status_code': 0, 'final_url': url,
+        'redirect_count': 0, 'redirected': False, 'broken': not silent,
+        'silent': silent, 'error': error, 'likely_bot_blocked': likely_blocked
+    }
 
 def check_link(url, timeout, max_redirects, silent_codes):
     """Check a single link and return status info"""
@@ -104,20 +162,18 @@ def check_link(url, timeout, max_redirects, silent_codes):
         
     except requests.exceptions.Timeout:
         # Check if timeout on a likely legitimate site
-        likely_blocked = is_likely_bot_blocked(url, error='timeout')
-        return {
-            'url': url, 'status_code': 0, 'final_url': url,
-            'redirect_count': 0, 'redirected': False, 'broken': not likely_blocked,
-            'silent': likely_blocked, 'error': 'Timeout', 'likely_bot_blocked': likely_blocked
-        }
+        return network_failure_result(url, 'Timeout', silent_codes,
+                                      network_failure=True)
     except requests.exceptions.ConnectionError as e:
-        # Check if connection error on a likely legitimate site  
-        likely_blocked = is_likely_bot_blocked(url, error='Connection Error')
-        return {
-            'url': url, 'status_code': 0, 'final_url': url,
-            'redirect_count': 0, 'redirected': False, 'broken': not likely_blocked,
-            'silent': likely_blocked, 'error': 'Connection Error', 'likely_bot_blocked': likely_blocked
-        }
+        # Check if connection error on a likely legitimate site
+        return network_failure_result(url, 'Connection Error', silent_codes,
+                                      network_failure=True)
+    except requests.exceptions.ChunkedEncodingError as e:
+        # The server answered and then broke the body mid-stream. Neither a
+        # Timeout nor a ConnectionError, but a transport failure all the
+        # same, and not something the project can fix by editing the link.
+        return network_failure_result(url, f'Connection broken: {e}', silent_codes,
+                                      network_failure=True)
     except UnicodeDecodeError as e:
         # Encoding issues often indicate bot blocking
         return {
@@ -126,13 +182,10 @@ def check_link(url, timeout, max_redirects, silent_codes):
             'silent': True, 'error': f'Encoding issue: {str(e)}', 'likely_bot_blocked': True
         }
     except Exception as e:
-        # Check if the error suggests bot blocking
-        likely_blocked = is_likely_bot_blocked(url, error=str(e))
-        return {
-            'url': url, 'status_code': 0, 'final_url': url,
-            'redirect_count': 0, 'redirected': False, 'broken': not likely_blocked,
-            'silent': likely_blocked, 'error': str(e), 'likely_bot_blocked': likely_blocked
-        }
+        # Not a recognised transport failure: a malformed href, a redirect
+        # loop or a bug here. Reported loudly regardless of silent-codes,
+        # since the project can fix it.
+        return network_failure_result(url, str(e), silent_codes)
 
 def extract_links_from_html(file_path):
     """Extract all external links from HTML file"""
@@ -265,32 +318,58 @@ def main():
     parser.add_argument('--max-redirects', type=int, default=5, help='Maximum redirects')
     parser.add_argument('--silent-codes', default='403,503', help='Silent status codes')
     parser.add_argument('--ai-suggestions', action='store_true', help='Enable AI suggestions')
-    
+    parser.add_argument('--ignore-patterns', default='',
+                        help='Regex patterns for URLs to skip entirely, one per line')
+    parser.add_argument('--ignore-patterns-file', default='',
+                        help='Path to a file of regex patterns to skip, one per line')
+
     args = parser.parse_args()
-    
+
     silent_codes = [int(x.strip()) for x in args.silent_codes.split(',') if x.strip()]
-    
+
+    # Patterns are newline-separated rather than comma-separated so that regex
+    # quantifiers such as {1,3} survive unsplit.
+    raw_ignore_patterns = args.ignore_patterns.splitlines()
+    if args.ignore_patterns_file:
+        try:
+            with open(args.ignore_patterns_file, 'r', encoding='utf-8') as f:
+                raw_ignore_patterns.extend(f.read().splitlines())
+        except OSError as e:
+            print(f"Warning: could not read ignore patterns file "
+                  f"{args.ignore_patterns_file!r}: {e}", file=sys.stderr)
+    ignore_patterns = compile_ignore_patterns(raw_ignore_patterns)
+
     # Extract links
     links = extract_links_from_html(args.file_path)
     if not links:
         print(json.dumps({
-            'broken_results': [], 'redirect_results': [], 
+            'broken_results': [], 'redirect_results': [], 'ignored_results': [],
             'ai_suggestions': [], 'total_links': 0
         }))
         return
-    
+
     broken_results = []
     redirect_results = []
-    
+    ignored_results = []
+
     print(f"Checking {len(links)} links in {args.file_path} (timeout: {args.timeout}s)...", file=sys.stderr)
-    
+
     # Check each link
     for i, link_info in enumerate(links):
         url = link_info['url']
+
+        # Ignored URLs are never requested, so they can be neither broken nor
+        # redirected -- an explicit exemption, not a suppressed finding.
+        if is_ignored(url, ignore_patterns):
+            ignored_results.append({
+                'url': url, 'file': args.file_path, 'text': link_info['text']
+            })
+            continue
+
         result = check_link(url, args.timeout, args.max_redirects, silent_codes)
         result['file'] = args.file_path
         result['text'] = link_info['text']
-        
+
         if result['broken'] and not result['silent']:
             broken_results.append(result)
         elif result['redirected']:
@@ -305,10 +384,15 @@ def main():
     if args.ai_suggestions:
         ai_suggestions = generate_ai_suggestions(broken_results, redirect_results)
     
+    if ignored_results:
+        print(f"Skipped {len(ignored_results)} link(s) matching ignore patterns",
+              file=sys.stderr)
+
     # Output results
     print(json.dumps({
         'broken_results': broken_results,
-        'redirect_results': redirect_results, 
+        'redirect_results': redirect_results,
+        'ignored_results': ignored_results,
         'ai_suggestions': ai_suggestions,
         'total_links': len(links)
     }))
