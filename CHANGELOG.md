@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-03
+
 ### Added
 - `ignore-patterns` input: newline-separated regular expressions for URLs to skip entirely. Matching URLs are never requested, so they can be reported as neither broken nor redirected, and are counted separately via the new `ignored-count` output
 - `update-existing-issue` input (default `true`): reuse the newest open issue with the same title and `broken-links` label, refreshing its body, instead of opening a duplicate on every run. New `issue-updated` output reports which path was taken
@@ -51,5 +53,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Full compatibility with existing workflows
 - Enhanced documentation and examples
 - Comprehensive test suite with Python module testing
-- GitHub Marketplace listing
 - Python requirements management with requirements.txt
+
+> The `v1.0.0` tag points at the repository's initial commit and no GitHub Release was ever published for it, so the Marketplace listing this section originally claimed does not exist. The tag is left where it is rather than moved. Pin `v1` or `v1.1.0` instead.
