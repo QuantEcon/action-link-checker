@@ -4,7 +4,9 @@ This directory contains test HTML files and scripts used to validate the link-ch
 
 ## What may depend on the network
 
-The HTML fixtures here feed a **live smoke scan** that is informational and does not gate CI. Everything that actually gates runs without touching the public internet.
+Most of the HTML fixtures here feed a **live smoke scan** that is informational and does not gate CI. Every *assertion* about the action's behaviour runs offline, against a mocked session or a fixture under `.invalid`.
+
+One step is a deliberate exception. `good-links.html` is scanned with `fail-on-broken: 'true'` and no `continue-on-error`, so it gates — and its four targets are real sites. If any of them starts redirecting, or is down when CI runs, that step goes red without the action having changed. It is kept because a genuine 200 over genuine HTTP is the one thing a mock cannot give us, but treat a failure there as a fixture problem until you have ruled the action out. Nothing else that gates touches the public internet.
 
 **Do not point a fixture at a status-code service.** `httpstat.us` and `httpbin.org/redirect/3` were both used here and both stopped answering. When that happened the links reported `Status: 0 (Connection Error)` instead of the 404/500/503 they were named for, so the CI step called "test with silent codes" stopped exercising silent codes entirely — and because it carried `continue-on-error: true`, nothing went red to say so. A third-party service that returns a status on demand is a dependency that will fail this way eventually.
 
@@ -16,7 +18,7 @@ Where each kind of coverage belongs:
 | Bot-blocking domain detection | `test_bot_blocking.py` | Pure substring matching on the URL; the request never has to succeed |
 | A host that cannot be reached | Workflow-generated fixtures under `.invalid` | RFC 2606 reserves `.invalid`, so it can never resolve — unlike a made-up name under a registrable TLD, which stops testing anything the day somebody buys it |
 | `ignore-patterns` and output plumbing | Workflow-generated fixtures + explicit assertions | Exact counts stay exact as fixtures are added to this directory |
-| Real DNS, TLS and cross-host redirects | The fixtures here, live smoke scan | The one thing a mock genuinely cannot cover — so it is kept, but never gates |
+| Real DNS, TLS and cross-host redirects | The fixtures here, live smoke scan | The one thing a mock genuinely cannot cover. Informational, except the `good-links.html` step noted above |
 
 ## Test Files
 
