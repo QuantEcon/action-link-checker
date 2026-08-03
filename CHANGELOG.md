@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- A `check-own-docs` CI job that renders this repository's Markdown and checks the links in it. It is the only job that posts a link-check comment on a pull request, and it posts one only when a link we publish has actually rotted
+- A `check-own-docs` CI job that renders this repository's Markdown and checks the links in it. It is the only job that posts a link-check comment on a pull request, and it posts one only when a link we publish is reported broken. It runs with `silent-codes: '0,403,503'`, so a transient timeout or DNS failure stays quiet and the comment is reserved for a real status such as a 404
 
 ### Changed
 - CI serves its own fixtures from `127.0.0.1`, so no gating step depends on the public internet any more. A clean page, a followed redirect, a reported error status and that status silenced by `silent-codes` are all asserted end to end against responses under our control. The scans of `good-links.html` and `broken-links.html` remain, as informational smoke that cannot turn CI red

@@ -331,11 +331,11 @@ jobs:
         html-path: 'empty-html'
 
   # Dogfooding, and the only place a PR comment is worth posting. The links
-  # here are real ones in our own documentation, so a finding means something
-  # actually rotted and the comment names it. When the docs are clean there
-  # are no findings, broken-links-found stays false and no comment is posted
-  # at all -- which is the point. A comment that appears on every run carries
-  # no information.
+  # here are real ones in our own documentation, so a finding names a link we
+  # publish that came back broken. When the docs are clean there are no
+  # findings, broken-links-found stays false and no comment is posted at all
+  # -- which is the point. A comment that appears on every run carries no
+  # information.
   #
   # This action reads HTML, so the Markdown is rendered first. Rendering also
   # does the filtering for free: the placeholder URLs in the usage examples
@@ -368,6 +368,14 @@ jobs:
 
     # continue-on-error because an outage at one of the linked sites is not a
     # reason to fail this repository's build. The PR comment is the signal.
+    #
+    # Status 0 is silenced. From a runner a transport failure cannot be told
+    # apart from a host that is simply down or throttling this IP range, and
+    # neither keepachangelog.com nor semver.org is on the legitimate_domains
+    # allowance, so a blip at either would otherwise post a comment about a
+    # link that is fine. A real 404 -- the class that found the dead
+    # Marketplace badge -- is unaffected. The cost is that a domain which
+    # disappears outright goes unreported here.
     - name: Check the links in the rendered docs
       id: docs
       continue-on-error: true
@@ -375,6 +383,7 @@ jobs:
       with:
         html-path: 'docs-html'
         fail-on-broken: 'true'
+        silent-codes: '0,403,503'
         timeout: 20
 
     - name: Report
@@ -382,5 +391,5 @@ jobs:
         echo "broken:   ${{ steps.docs.outputs.broken-link-count }}"
         echo "redirects: ${{ steps.docs.outputs.redirect-count }}"
         if [ "${{ steps.docs.outputs.broken-links-found }}" = "true" ]; then
-          echo "::warning::Our own documentation has link findings -- see the PR comment"
+          echo "::warning::A link in our own documentation came back broken -- see the PR comment"
         fi
