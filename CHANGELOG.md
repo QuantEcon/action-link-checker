@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A `check-own-docs` CI job that renders this repository's Markdown and checks the links in it. It is the only job that posts a link-check comment on a pull request, and it posts one only when a link we publish has actually rotted
+
 ### Changed
 - CI serves its own fixtures from `127.0.0.1`, so no gating step depends on the public internet any more. A clean page, a followed redirect, a reported error status and that status silenced by `silent-codes` are all asserted end to end against responses under our control. The scans of `good-links.html` and `broken-links.html` remain, as informational smoke that cannot turn CI red
+- The fixture scans no longer post a link-check comment on pull requests. Their findings are true by construction, so the comment reported the same fixture on every run and carried no information
+
+### Fixed
+- The README linked a GitHub Marketplace badge to `https://github.com/marketplace/actions/ai-link-checker`, which returns 404 — the action was never published there. Found by the new `check-own-docs` job on its first run
 
 ## [1.1.0] - 2026-08-03
 
