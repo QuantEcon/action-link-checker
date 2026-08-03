@@ -70,13 +70,56 @@ jobs:
         html-path: 'tests/good-links.html'
         fail-on-broken: 'true'
         
-    - name: Test with silent codes for broken links
+    # Informational only, and expected to report findings: the fixture holds
+    # a deliberately unreachable host and three deliberate redirects. It runs
+    # with fail-on-broken so that the PR-comment path is exercised, and with
+    # continue-on-error so that neither those findings nor an outage at one of
+    # the redirect targets can gate CI. Do not read its result as an
+    # assertion -- the assertions are the deterministic steps below.
+    - name: Live smoke scan (informational, does not gate)
       continue-on-error: true
       uses: ./
       with:
         html-path: 'tests/broken-links.html'
         fail-on-broken: 'true'
-        silent-codes: '404,500'  # Treat these as silent
+        timeout: 30
+
+    # Status 0 is what the checker reports when a request never reaches the
+    # server. .invalid is reserved by RFC 2606 and can never resolve, so these
+    # two links fail transport on every run, immediately and without contacting
+    # anything. That makes silent-codes '0' testable without a live host --
+    # which is what the old httpstat.us fixture was trying and failing to do.
+    - name: Create unreachable-host fixture
+      run: |
+        mkdir -p ci-fixtures-unreachable
+        cat > ci-fixtures-unreachable/unreachable.html <<'HTML'
+        <html><body>
+        <a href="https://host-one.invalid/">One</a>
+        <a href="https://host-two.invalid/page">Two</a>
+        </body></html>
+        HTML
+
+    - name: Unreachable hosts are reported by default
+      id: unreachable-loud
+      uses: ./
+      with:
+        html-path: 'ci-fixtures-unreachable'
+        fail-on-broken: 'false'
+        ai-suggestions: 'false'
+        timeout: 10
+
+    # fail-on-broken is deliberately true here: if status-0 silencing ever
+    # regresses, this step fails on its own rather than waiting for the
+    # assertions below.
+    - name: silent-codes 0 suppresses unreachable hosts
+      id: unreachable-quiet
+      uses: ./
+      with:
+        html-path: 'ci-fixtures-unreachable'
+        fail-on-broken: 'true'
+        ai-suggestions: 'false'
+        timeout: 10
+        silent-codes: '0,403,503'
 
     # The ignore-patterns fixture is built here rather than kept in tests/ so
     # that the counts below are exact and the other jobs keep scanning the
@@ -117,7 +160,7 @@ jobs:
         ai-suggestions: 'false'
         timeout: 10
 
-    - name: Verify ignore-patterns counts
+    - name: Verify action outputs
       run: |
         assert() {
           if [ "$2" != "$3" ]; then
@@ -126,11 +169,15 @@ jobs:
           fi
           echo "ok: $1 = $2"
         }
-        assert "ignored-count with patterns"       "${{ steps.test-ignored.outputs.ignored-count }}"          "3"
-        assert "broken-link-count with patterns"   "${{ steps.test-ignored.outputs.broken-link-count }}"      "0"
-        assert "broken-links-found with patterns"  "${{ steps.test-ignored.outputs.broken-links-found }}"     "false"
-        assert "ignored-count without patterns"    "${{ steps.test-not-ignored.outputs.ignored-count }}"      "0"
-        assert "broken-link-count without patterns" "${{ steps.test-not-ignored.outputs.broken-link-count }}" "3"
+        assert "ignored-count with patterns"        "${{ steps.test-ignored.outputs.ignored-count }}"          "3"
+        assert "broken-link-count with patterns"    "${{ steps.test-ignored.outputs.broken-link-count }}"      "0"
+        assert "broken-links-found with patterns"   "${{ steps.test-ignored.outputs.broken-links-found }}"     "false"
+        assert "ignored-count without patterns"     "${{ steps.test-not-ignored.outputs.ignored-count }}"      "0"
+        assert "broken-link-count without patterns" "${{ steps.test-not-ignored.outputs.broken-link-count }}"  "3"
+        assert "unreachable reported by default"    "${{ steps.unreachable-loud.outputs.broken-link-count }}"  "2"
+        assert "unreachable found by default"       "${{ steps.unreachable-loud.outputs.broken-links-found }}" "true"
+        assert "unreachable silenced by code 0"     "${{ steps.unreachable-quiet.outputs.broken-link-count }}" "0"
+        assert "no findings once silenced"          "${{ steps.unreachable-quiet.outputs.broken-links-found }}" "false"
 
   test-empty-directory:
     runs-on: ubuntu-latest

@@ -4,30 +4,38 @@
     <title>Test Page with Broken Links</title>
 </head>
 <body>
+    <!--
+      Fixture for the live smoke scan. It may only depend on network
+      behaviour that is stable indefinitely: a host that cannot resolve, and
+      redirects served by projects that are not going anywhere.
+
+      Do NOT add a link to a status-code service such as httpstat.us or
+      httpbin.org. Both were used here and both stopped answering, at which
+      point the links reported "Status: 0 (Connection Error)" and the step
+      that claimed to test silent-codes silently tested nothing. Status-code
+      behaviour is asserted in tests/test_modules.py with a mocked session,
+      where it is deterministic and offline.
+
+      Hosts under .invalid are reserved by RFC 2606 and can never resolve, so
+      they are safe forever. A made-up name under a registrable TLD is not --
+      the moment somebody buys it, the fixture stops testing anything.
+    -->
+
     <h1>Test Page - With Broken Links</h1>
-    
+
     <p>This page contains broken and problematic links for testing:</p>
-    
+
     <ul>
-        <li><a href="https://this-domain-does-not-exist-12345.com">Broken domain</a></li>
-        <li><a href="https://httpstat.us/404">Returns 404</a></li>
-        <li><a href="https://httpstat.us/500">Returns 500</a></li>
+        <li><a href="https://this-host-cannot-resolve.invalid">Broken domain</a></li>
         <li><a href="http://github.com/QuantEcon/meta">HTTP instead of HTTPS</a></li>
         <li><a href="https://github.com/QuantEcon/meta/blob/master/README.md">Master branch instead of main</a></li>
     </ul>
-    
-    <p>Links that should be silently reported:</p>
-    <ul>
-        <li><a href="https://httpstat.us/403">Returns 403 Forbidden</a></li>
-        <li><a href="https://httpstat.us/503">Returns 503 Service Unavailable</a></li>
-    </ul>
-    
+
     <p>Redirected links that could be improved:</p>
     <ul>
         <li><a href="http://docs.python.org/2.7/library/urllib.html">Old Python 2.7 docs</a></li>
-        <li><a href="https://bit.ly/3xyz123">Shortened URL that redirects</a></li>
     </ul>
-    
+
     <p>Good links for comparison:</p>
     <ul>
         <li><a href="https://github.com/QuantEcon">QuantEcon GitHub</a></li>
