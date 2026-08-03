@@ -128,7 +128,7 @@ The action includes intelligent logic to reduce false positives for legitimate s
 Some hosts throttle or block datacenter IP ranges outright, so they time out from a CI runner while working perfectly for readers. The automatic detection below catches many of these, but it cannot know which hosts a particular project depends on. Use `ignore-patterns` to declare them:
 
 ```yaml
-- uses: QuantEcon/action-link-checker@main
+- uses: QuantEcon/action-link-checker@v1
   with:
     html-path: '_site'
     ignore-patterns: |
@@ -139,9 +139,9 @@ Some hosts throttle or block datacenter IP ranges outright, so they time out fro
 
 Patterns are Python regular expressions, one per line — newline-separated rather than comma-separated so that quantifiers such as `{1,3}` survive intact. Each is matched against the full URL with `re.search`, so a bare domain works as a substring without anchoring.
 
-Ignored URLs are never requested at all. They therefore cannot be reported as broken *or* as redirects, and they are counted separately in the report and exposed as the `ignored-count` output. An invalid pattern is logged and skipped rather than failing the run.
+Ignored URLs are never requested at all. They therefore cannot be reported as broken *or* as redirects, and they are counted separately in the report and exposed as the `ignored-count` output. An invalid pattern is logged to the job log and skipped rather than failing the run.
 
-If a project already maintains a Sphinx `linkcheck_ignore` list, those patterns can be pasted here directly — the syntax is the same.
+If a project already maintains a Sphinx `linkcheck_ignore` list, those patterns can be pasted here directly. Both take Python regular expressions, so the syntax carries over unchanged; note that Sphinx anchors its patterns at the start of the URL while this action matches anywhere in it, so a pattern here may match slightly more than the same pattern does under Sphinx.
 
 ### Bot Blocking Detection
 - **Major Sites**: Automatically detects common sites that block automated requests (Netflix, Amazon, Facebook, etc.)
@@ -222,13 +222,17 @@ Common codes to consider:
 - `503`: Service Unavailable (temporary outages)
 - `429`: Too Many Requests (rate limiting)
 - `502`: Bad Gateway (temporary server issues)
-- `0`: No response at all — the request failed before the server answered (timeout, DNS failure, connection refused). Silencing `0` suppresses every unreachable host, so prefer `ignore-patterns` when only specific hosts are affected.
+- `0`: The request never completed — it timed out, the connection failed (DNS failure, connection refused), or the server broke the response mid-stream. Silencing `0` suppresses every unreachable host, so prefer `ignore-patterns` when only specific hosts are affected. It applies to transport failures only: a malformed link such as `https://` and a redirect loop also report status `0`, and those stay reported however `silent-codes` is set, since they are the project's own to fix.
 
 ### Recurring Reports
 
 When `create-issue` is enabled on a schedule, the action reuses the newest open issue carrying the same `issue-title` and the `broken-links` label, refreshing its body with the latest run instead of opening another issue. A weekly cron on a persistent finding therefore produces one issue, not one per week.
 
 Close the issue once the links are fixed; if the finding recurs afterwards, a fresh issue is opened. To restore the previous behaviour of always opening a new issue, set `update-existing-issue: 'false'`.
+
+Two things follow from matching on the title and the label. Give each workflow its own `issue-title` if a repository runs more than one link check, or they will overwrite each other's report. And leave the `broken-links` label in place — if it is removed from the tracking issue, later runs stop finding it and start opening duplicates again.
+
+Note that GitHub does not send notifications for an edit to an issue body, so a refreshed report is quiet by design. Watch the scheduled workflow itself if you want to be told about every run.
 
 ### Performance Tuning
 

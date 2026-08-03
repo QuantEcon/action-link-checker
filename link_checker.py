@@ -17,8 +17,16 @@ def is_external_link(url):
     """Check if URL is external (starts with http/https)"""
     return url.startswith(('http://', 'https://'))
 
-def is_likely_bot_blocked(url, response_content=None, status_code=None, error=None):
-    """Detect if a site is likely blocking automated requests rather than being truly broken"""
+def is_likely_bot_blocked(url, response_content=None, status_code=None, error=None,
+                          network_failure=False):
+    """Detect if a site is likely blocking automated requests rather than being truly broken
+
+    ``network_failure`` says the request never reached the server -- a
+    timeout or a connection error. Only the caller knows that, so it is
+    passed in rather than sniffed out of the error string: an arbitrary
+    exception message can contain the word 'timeout' without the request
+    having failed in transit.
+    """
     domain_indicators = [
         'netflix.com', 'amazon.com', 'facebook.com', 'twitter.com', 'instagram.com',
         'youtube.com', 'linkedin.com', 'pinterest.com', 'reddit.com', 'wikipedia.org'
@@ -39,10 +47,11 @@ def is_likely_bot_blocked(url, response_content=None, status_code=None, error=No
     # Check if it's a legitimate domain that might be blocked by network
     # restrictions. A timeout and a connection error are two symptoms of the
     # same cause -- a host that will not answer a datacenter IP -- so both are
-    # treated alike here. Matching only 'Connection Error' meant a listed
-    # domain was protected against one and reported broken on the other.
-    network_errors = ('connection error', 'timeout')
-    if error and any(err in str(error).lower() for err in network_errors):
+    # treated alike here. Keying this on the error string meant a listed
+    # domain was protected against 'Connection Error' and reported broken on
+    # a timeout; keying it on which handler caught the exception protects
+    # both without also matching an unrelated message that says 'timeout'.
+    if network_failure:
         for domain in legitimate_domains:
             if domain in url.lower():
                 return True
@@ -67,24 +76,34 @@ def compile_ignore_patterns(raw_patterns):
             continue
         try:
             compiled.append(re.compile(pattern))
-        except re.error as e:
-            print(f"Warning: skipping invalid ignore pattern {pattern!r}: {e}",
-                  file=sys.stderr)
+        except Exception as e:
+            # Deliberately broader than re.error: re.compile also raises
+            # OverflowError on an oversized repetition count and
+            # RecursionError on deep nesting, and a pattern the user typed
+            # must never be able to abort the run.
+            print(f"Warning: skipping invalid ignore pattern {pattern!r}: "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
     return compiled
 
 def is_ignored(url, ignore_patterns):
     """Check whether a URL matches any ignore pattern"""
     return any(pattern.search(url) for pattern in ignore_patterns)
 
-def network_failure_result(url, error, silent_codes):
+def network_failure_result(url, error, silent_codes, network_failure=False):
     """Build a result for a request that never returned a status code.
 
     Status 0 is what this checker reports when a request fails before the
     server answers. Honouring 0 in silent-codes lets a project silence
     unreachable hosts without also silencing genuine 404s.
+
+    ``network_failure`` is set only by the timeout and connection-error
+    handlers. A malformed href, a redirect loop and a bug in this script all
+    surface as status 0 too, and silencing an unreachable host must not
+    silence those as well -- they are the project's own mistakes to fix.
     """
-    likely_blocked = is_likely_bot_blocked(url, error=error)
-    silent = likely_blocked or 0 in silent_codes
+    likely_blocked = is_likely_bot_blocked(url, error=error,
+                                           network_failure=network_failure)
+    silent = likely_blocked or (network_failure and 0 in silent_codes)
     return {
         'url': url, 'status_code': 0, 'final_url': url,
         'redirect_count': 0, 'redirected': False, 'broken': not silent,
@@ -143,10 +162,18 @@ def check_link(url, timeout, max_redirects, silent_codes):
         
     except requests.exceptions.Timeout:
         # Check if timeout on a likely legitimate site
-        return network_failure_result(url, 'Timeout', silent_codes)
+        return network_failure_result(url, 'Timeout', silent_codes,
+                                      network_failure=True)
     except requests.exceptions.ConnectionError as e:
         # Check if connection error on a likely legitimate site
-        return network_failure_result(url, 'Connection Error', silent_codes)
+        return network_failure_result(url, 'Connection Error', silent_codes,
+                                      network_failure=True)
+    except requests.exceptions.ChunkedEncodingError as e:
+        # The server answered and then broke the body mid-stream. Neither a
+        # Timeout nor a ConnectionError, but a transport failure all the
+        # same, and not something the project can fix by editing the link.
+        return network_failure_result(url, f'Connection broken: {e}', silent_codes,
+                                      network_failure=True)
     except UnicodeDecodeError as e:
         # Encoding issues often indicate bot blocking
         return {
@@ -155,7 +182,9 @@ def check_link(url, timeout, max_redirects, silent_codes):
             'silent': True, 'error': f'Encoding issue: {str(e)}', 'likely_bot_blocked': True
         }
     except Exception as e:
-        # Check if the error suggests bot blocking
+        # Not a recognised transport failure: a malformed href, a redirect
+        # loop or a bug here. Reported loudly regardless of silent-codes,
+        # since the project can fix it.
         return network_failure_result(url, str(e), silent_codes)
 
 def extract_links_from_html(file_path):

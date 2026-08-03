@@ -123,8 +123,11 @@ runs:
         echo "AI suggestions enabled: $AI_SUGGESTIONS"
 
         # Write ignore patterns to a file so the checker never has to parse
-        # them out of an argument list
+        # them out of an argument list. The trap is installed with the file
+        # so that cleanup survives the early exits below and any set -e abort.
         IGNORE_FILE="$(mktemp)"
+        STDERR_LOG="$(mktemp)"
+        trap 'rm -f "$IGNORE_FILE" "$STDERR_LOG"' EXIT
         printf '%s\n' "$IGNORE_PATTERNS" > "$IGNORE_FILE"
         IGNORE_COUNT=$(grep -cve '^[[:space:]]*$' -e '^[[:space:]]*#' "$IGNORE_FILE" || true)
         if [ "$IGNORE_COUNT" -gt 0 ]; then
@@ -178,20 +181,31 @@ runs:
             AI_FLAG="--ai-suggestions"
           fi
           
-          # Run link checker and capture JSON output
+          # Run link checker and capture JSON output. The exit status is
+          # captured explicitly: this step runs under `set -e`, where a bare
+          # assignment aborts before any `if [ $? -ne 0 ]` guard could run.
+          rc=0
           result_json=$(python3 "$ACTION_DIR/link_checker.py" "$file" \
             --timeout "$TIMEOUT" \
             --max-redirects "$MAX_REDIRECTS" \
             --silent-codes "$SILENT_CODES" \
             --ignore-patterns-file "$IGNORE_FILE" \
-            $AI_FLAG 2>/tmp/stderr.log)
-          
-          if [ $? -ne 0 ] || [ -z "$result_json" ]; then
-            echo "Warning: Failed to process $file"
-            cat /tmp/stderr.log >&2
-            continue
+            $AI_FLAG 2>"$STDERR_LOG") || rc=$?
+
+          # The checker reports progress and warnings -- a skipped ignore
+          # pattern, an unreadable file -- on stderr. Surface them, or they
+          # never reach the job log.
+          if [ -s "$STDERR_LOG" ]; then
+            cat "$STDERR_LOG" >&2
           fi
-          
+
+          # A crashed checker is a hard failure, not a file to skip: carrying
+          # on would report the remaining files as clean and exit green.
+          if [ "$rc" -ne 0 ] || [ -z "$result_json" ]; then
+            echo "::error::link_checker.py failed on $file (exit $rc)"
+            exit 1
+          fi
+
           # Parse results and update counters
           broken_count=$(echo "$result_json" | python3 -c "import json, sys; data=json.load(sys.stdin); print(len(data['broken_results']))")
           redirect_count=$(echo "$result_json" | python3 -c "import json, sys; data=json.load(sys.stdin); print(len(data['redirect_results']))")
@@ -228,20 +242,24 @@ runs:
           echo "  Found $total_links total links, $broken_count broken, $redirect_count redirected, $ignored_count ignored"
         done
 
-        rm -f "$IGNORE_FILE"
+        # Multi-line outputs carry scanned link text verbatim. A fixed EOF
+        # delimiter is terminated early by an anchor whose text contains a
+        # line reading exactly EOF, which corrupts the whole output file, so
+        # the delimiter is generated per run instead.
+        DELIM="ghadelim_${RANDOM}${RANDOM}${RANDOM}"
 
         # Set outputs
         echo "broken-links-found=$BROKEN_LINKS_FOUND" >> $GITHUB_OUTPUT
         echo "broken-link-count=$TOTAL_BROKEN" >> $GITHUB_OUTPUT
         echo "redirect-count=$TOTAL_REDIRECTS" >> $GITHUB_OUTPUT
         echo "ignored-count=$TOTAL_IGNORED" >> $GITHUB_OUTPUT
-        echo "link-details<<EOF" >> $GITHUB_OUTPUT
+        echo "link-details<<$DELIM" >> $GITHUB_OUTPUT
         echo -e "$LINK_DETAILS" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
-        echo "ai-suggestions<<EOF" >> $GITHUB_OUTPUT
+        echo "$DELIM" >> $GITHUB_OUTPUT
+        echo "ai-suggestions<<$DELIM" >> $GITHUB_OUTPUT
         echo -e "$AI_SUGGESTIONS_OUTPUT" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
-        
+        echo "$DELIM" >> $GITHUB_OUTPUT
+
         # Create detailed report for artifacts/issues
         DETAILED_REPORT="## Link Check Summary\n\n"
         DETAILED_REPORT="$DETAILED_REPORT- **Total broken links**: $TOTAL_BROKEN\n"
@@ -259,9 +277,9 @@ runs:
           DETAILED_REPORT="$DETAILED_REPORT## AI-Powered Suggestions\n$AI_SUGGESTIONS_OUTPUT\n\n"
         fi
         
-        echo "detailed-report<<EOF" >> $GITHUB_OUTPUT
+        echo "detailed-report<<$DELIM" >> $GITHUB_OUTPUT
         echo -e "$DETAILED_REPORT" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
+        echo "$DELIM" >> $GITHUB_OUTPUT
         
         # Summary
         if [ "$BROKEN_LINKS_FOUND" = "true" ]; then
@@ -404,7 +422,9 @@ runs:
             '3. Consider applying AI suggestions for better alternatives',
             '4. Re-run the link check to verify fixes',
             '',
-            '**Note:** This issue was automatically created by the [AI-Powered Link Checker Action](https://github.com/QuantEcon/action-link-checker). While it stays open, later runs refresh this body in place rather than opening a new issue, so the report above always reflects the most recent run.',
+            '**Note:** This issue was automatically created by the [AI-Powered Link Checker Action](https://github.com/QuantEcon/action-link-checker). ' + (updateExisting
+              ? 'While it stays open, later runs refresh this body in place rather than opening a new issue, so the report above always reflects the most recent run.'
+              : 'This workflow sets `update-existing-issue: false`, so each run opens a new issue rather than refreshing this one.'),
             '',
             'Please close this issue once all broken links have been addressed.'
           ].join('\n');

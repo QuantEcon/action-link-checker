@@ -36,6 +36,11 @@ jobs:
         cd tests
         python test_modules.py
 
+    - name: Run bot-blocking tests
+      run: |
+        cd tests
+        python test_bot_blocking.py
+
   test-action:
     runs-on: ubuntu-latest
     name: Test Link Checker Action
@@ -66,13 +71,67 @@ jobs:
         fail-on-broken: 'true'
         
     - name: Test with silent codes for broken links
-      continue-on-error: true  
+      continue-on-error: true
       uses: ./
       with:
         html-path: 'tests/broken-links.html'
         fail-on-broken: 'true'
         silent-codes: '404,500'  # Treat these as silent
-        
+
+    # The ignore-patterns fixture is built here rather than kept in tests/ so
+    # that the counts below are exact and the other jobs keep scanning the
+    # same files they always have. Every host is under .invalid, which is
+    # reserved and never resolves, so the ignored case makes no requests at
+    # all and the un-ignored case fails fast.
+    - name: Create ignore-patterns fixture
+      run: |
+        mkdir -p ci-fixtures
+        cat > ci-fixtures/ignore-patterns.html <<'HTML'
+        <html><body>
+        <a href="https://fred.stlouisfed.org.invalid/">FRED</a>
+        <a href="https://fred.stlouisfed.org.invalid/series/UNRATE">UNRATE</a>
+        <a href="https://blocked.example.invalid/page">Blocked</a>
+        </body></html>
+        HTML
+
+    - name: Test ignore-patterns skips matching links
+      id: test-ignored
+      uses: ./
+      with:
+        html-path: 'ci-fixtures'
+        fail-on-broken: 'true'
+        ai-suggestions: 'false'
+        timeout: 10
+        ignore-patterns: |
+          https://fred\.stlouisfed\.org\.invalid/.*
+          # comments and blank lines are skipped
+
+          blocked\.example\.invalid
+
+    - name: Test ignore-patterns off reports the same links
+      id: test-not-ignored
+      uses: ./
+      with:
+        html-path: 'ci-fixtures'
+        fail-on-broken: 'false'
+        ai-suggestions: 'false'
+        timeout: 10
+
+    - name: Verify ignore-patterns counts
+      run: |
+        assert() {
+          if [ "$2" != "$3" ]; then
+            echo "::error::$1: expected '$3', got '$2'"
+            exit 1
+          fi
+          echo "ok: $1 = $2"
+        }
+        assert "ignored-count with patterns"       "${{ steps.test-ignored.outputs.ignored-count }}"          "3"
+        assert "broken-link-count with patterns"   "${{ steps.test-ignored.outputs.broken-link-count }}"      "0"
+        assert "broken-links-found with patterns"  "${{ steps.test-ignored.outputs.broken-links-found }}"     "false"
+        assert "ignored-count without patterns"    "${{ steps.test-not-ignored.outputs.ignored-count }}"      "0"
+        assert "broken-link-count without patterns" "${{ steps.test-not-ignored.outputs.broken-link-count }}" "3"
+
   test-empty-directory:
     runs-on: ubuntu-latest
     name: Test Empty Directory
