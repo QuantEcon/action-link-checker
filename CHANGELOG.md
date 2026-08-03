@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Corrected the action's self-referencing links in issue bodies, PR comments, artifacts and `examples.md`, which still pointed at the pre-migration `QuantEcon/meta` path
 - The generated issue body claimed later runs would refresh it in place even when `update-existing-issue` was `false`
 - The temporary ignore-patterns file is removed via an `EXIT` trap, so it is not left behind when the step exits early
+- The test fixtures depended on `httpstat.us` and `httpbin.org` for status codes and multi-hop redirects. Both stopped answering, so those links reported `Status: 0 (Connection Error)` and the CI step named for `silent-codes` exercised no silent-code logic at all — masked by `continue-on-error: true`. Status codes and redirect counting are now asserted against a mocked session, unreachable hosts use RFC 2606 `.invalid` names, and the live scan is labelled as the informational step it always was
+- `tests/README.md` documented local commands that ran `./action.yml` as an executable, which was never possible
+
+*(No change to the action's behaviour in the last two entries — test and documentation only.)*
 
 ## [1.0.0] - 2025-10-01
 

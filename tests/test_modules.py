@@ -10,6 +10,9 @@ import subprocess
 import unittest
 import tempfile
 from pathlib import Path
+from unittest import mock
+
+import requests
 
 # Add the parent directory to sys.path to import the modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -130,9 +133,6 @@ class TestLinkChecker(unittest.TestCase):
         needs its own handler or it falls through to the catch-all and stays
         loud however silent-codes is set.
         """
-        import requests
-        from unittest import mock
-
         exc = requests.exceptions.ChunkedEncodingError('Connection broken')
         with mock.patch.object(requests.Session, 'get', side_effect=exc):
             quiet = link_checker.check_link(
@@ -230,6 +230,92 @@ class TestLinkChecker(unittest.TestCase):
                 print(f"ℹ️  Expected network-related error: {e}")
         else:
             print("ℹ️  Test HTML files not found, skipping file-based tests")
+
+
+class TestStatusCodeHandling(unittest.TestCase):
+    """How check_link classifies a server that did answer.
+
+    These used to be covered by pointing fixtures at httpstat.us. That service
+    stopped answering, so every one of those links reported status 0 and the
+    CI step named for silent-codes exercised none of this. A status code is
+    just an input to a decision, so it does not need a server -- mocking the
+    session keeps the coverage deterministic and offline.
+    """
+
+    @staticmethod
+    def _respond(status_code, url='https://example.com/page', history=()):
+        response = mock.Mock()
+        response.status_code = status_code
+        response.url = url
+        response.history = list(history)
+        response.ok = status_code < 400
+        response.text = ''
+        return mock.patch.object(requests.Session, 'get', return_value=response)
+
+    def _check(self, status_code, silent_codes, url='https://example.com/page',
+               history=()):
+        with self._respond(status_code, url, history):
+            return link_checker.check_link(url, 30, 5, silent_codes)
+
+    def test_ok_response_is_neither_broken_nor_silent(self):
+        result = self._check(200, [403, 503])
+        self.assertFalse(result['broken'])
+        self.assertFalse(result['silent'])
+        self.assertFalse(result['redirected'])
+
+    def test_error_status_is_broken_unless_listed(self):
+        """The plain case: a 404 nobody asked to silence is a broken link"""
+        for code in (400, 404, 410, 500):
+            with self.subTest(code=code):
+                result = self._check(code, [403, 503])
+                self.assertTrue(result['broken'])
+                self.assertFalse(result['silent'])
+
+    def test_listed_status_is_silenced(self):
+        """silent-codes suppresses exactly the codes it names"""
+        for code in (404, 500):
+            with self.subTest(code=code):
+                result = self._check(code, [404, 500])
+                self.assertFalse(result['broken'])
+                self.assertTrue(result['silent'])
+
+    def test_silent_codes_replaces_the_default_rather_than_extending_it(self):
+        """403 is silent by default, and loud once silent-codes omits it
+
+        This is why the old `silent-codes: '404,500'` CI step could not pass
+        even when its fixture host was up: setting silent-codes replaces
+        '403,503', so the 403 link became broken.
+        """
+        self.assertTrue(self._check(403, [403, 503])['silent'])
+
+        loud = self._check(403, [404, 500])
+        self.assertTrue(loud['broken'])
+        self.assertFalse(loud['silent'])
+
+    def test_bot_blocking_codes_are_silent_even_when_not_listed(self):
+        """429/451/503 are absorbed by is_likely_bot_blocked, not silent-codes"""
+        for code in (429, 451, 503):
+            with self.subTest(code=code):
+                result = self._check(code, [404, 500])
+                self.assertFalse(result['broken'])
+                self.assertTrue(result['silent'])
+                self.assertTrue(result['likely_bot_blocked'])
+
+    def test_redirected_response_is_counted_not_broken(self):
+        result = self._check(200, [403, 503],
+                             url='https://example.com/final',
+                             history=[object(), object()])
+        self.assertTrue(result['redirected'])
+        self.assertEqual(result['redirect_count'], 2)
+        self.assertFalse(result['broken'])
+
+    def test_redirect_to_an_error_is_still_broken(self):
+        """Following redirects to a 404 must not be excused by the redirect"""
+        result = self._check(404, [403, 503],
+                             url='https://example.com/gone',
+                             history=[object()])
+        self.assertTrue(result['broken'])
+
 
 def main():
     print("🧪 Running Link Checker Tests")
