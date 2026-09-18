@@ -293,7 +293,7 @@ runs:
 
     - name: Post PR comment with link report
       if: inputs.fail-on-broken == 'true' && steps.check.outputs.broken-links-found == 'true' && github.event_name == 'pull_request'
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       with:
         script: |
           const brokenCount = '${{ steps.check.outputs.broken-link-count }}';
@@ -378,7 +378,7 @@ runs:
 
     - name: Upload link report artifact
       if: inputs.create-artifact == 'true' && steps.check.outputs.broken-links-found == 'true'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ steps.create-artifact.outputs.artifact-path }}
@@ -387,7 +387,7 @@ runs:
     - name: Create GitHub issue
       id: create-issue
       if: inputs.create-issue == 'true' && steps.check.outputs.broken-links-found == 'true'
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       with:
         script: |
           const brokenCount = '${{ steps.check.outputs.broken-link-count }}';
@@ -509,7 +509,7 @@ runs:
 
     - name: Post simple PR comment linking to issue
       if: inputs.create-issue == 'true' && steps.check.outputs.broken-links-found == 'true' && github.event_name == 'pull_request'
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       with:
         script: |
           const issueUrl = '${{ steps.create-issue.outputs.issue-url }}';

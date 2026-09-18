@@ -1,0 +1,21 @@
+# Dependabot keeps the action pins current, grouped as in QuantEcon/actions:
+#   - "github-actions"        minor and patch updates, in one PR
+#   - "github-actions-major"  major updates, in one PR (review before merging)
+# "/" covers .github/workflows/ and the root action.yml, so the pins inside
+# the composite action are tracked as well as the CI workflow's.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "⬆️"
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
+      github-actions-major:
+        patterns: ["*"]
+        update-types: [major]
